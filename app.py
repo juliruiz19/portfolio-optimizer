@@ -101,6 +101,17 @@ def plot_layout(height=380, r=10, **kw):
 def explain(text):
     st.markdown(f'<p class="explain">{text}</p>', unsafe_allow_html=True)
 
+# ── HTTP headers (Yahoo/FRED reject requests without a real UA from cloud IPs) ─
+HTTP_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml,application/json;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
 # ── Risk-free rate (live from FRED) ───────────────────────────────────────────
 @st.cache_data(ttl=3600, show_spinner=False)   # refresh every hour
 def fetch_risk_free_rate():
@@ -110,7 +121,7 @@ def fetch_risk_free_rate():
     """
     try:
         url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=DGS3MO"
-        r   = crequests.get(url, timeout=10)
+        r   = crequests.get(url, timeout=10, headers=HTTP_HEADERS)
         lines = [l for l in r.text.strip().split("\n") if l.strip()]
         # Iterate from the end — find the last row with a valid numeric value
         for line in reversed(lines[1:]):           # skip header
@@ -133,7 +144,7 @@ def download_prices(tickers: tuple, start: str):
         try:
             url = (f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
                    f"?interval=1d&period1={start_ts}&period2={end_ts}")
-            r    = crequests.get(url, timeout=15)
+            r    = crequests.get(url, timeout=15, headers=HTTP_HEADERS)
             data = r.json()
             result = data["chart"]["result"][0]
             ts     = result["timestamp"]
@@ -154,7 +165,7 @@ def fetch_realtime_prices(tickers: tuple) -> dict:
     for ticker in tickers:
         try:
             url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range=1d"
-            r   = crequests.get(url, timeout=10)
+            r   = crequests.get(url, timeout=10, headers=HTTP_HEADERS)
             result = r.json()["chart"]["result"][0]
             meta   = result["meta"]
             price  = meta.get("regularMarketPrice") or meta.get("previousClose")
