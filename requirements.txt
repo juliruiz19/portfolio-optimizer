@@ -1,0 +1,6 @@
+streamlit==1.56.0
+numpy==2.0.0
+pandas==2.2.2
+plotly==6.7.0
+curl-cffi==0.15.0
+scipy==1.14.0
