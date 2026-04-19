@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import requests as crequests
+import yfinance as yf
 from scipy.optimize import minimize
 from scipy.stats import chi2 as chi2_dist
 import warnings
@@ -137,21 +138,25 @@ def fetch_risk_free_rate():
 # ── Data (cached) ─────────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def download_prices(tickers: tuple, start: str):
-    start_ts = int(pd.Timestamp(start).timestamp())
-    end_ts   = int(pd.Timestamp.now().timestamp())
+    """Adjusted close prices via yfinance (handles Yahoo's auth dance)."""
     series = {}
     for ticker in tickers:
         try:
-            url = (f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
-                   f"?interval=1d&period1={start_ts}&period2={end_ts}")
-            r    = crequests.get(url, timeout=15, headers=HTTP_HEADERS)
-            data = r.json()
-            result = data["chart"]["result"][0]
-            ts     = result["timestamp"]
-            closes = result["indicators"]["adjclose"][0]["adjclose"]
-            dates  = pd.to_datetime(ts, unit="s").normalize()
-            s = pd.Series(closes, index=dates, name=ticker)
-            series[ticker] = s[~s.index.duplicated(keep="last")]
+            df = yf.download(
+                ticker,
+                start=start,
+                progress=False,
+                auto_adjust=True,
+                threads=False,
+            )
+            if df.empty:
+                continue
+            close = df["Close"]
+            if isinstance(close, pd.DataFrame):
+                close = close.iloc[:, 0]
+            close.name = ticker
+            close.index = pd.to_datetime(close.index).normalize()
+            series[ticker] = close[~close.index.duplicated(keep="last")]
         except Exception:
             pass
     if not series:
@@ -160,15 +165,17 @@ def download_prices(tickers: tuple, start: str):
 
 @st.cache_data(ttl=60, show_spinner=False)   # precio real, cache 1 minuto
 def fetch_realtime_prices(tickers: tuple) -> dict:
-    """Devuelve {ticker: último precio} usando Yahoo Finance regularMarketPrice."""
+    """Devuelve {ticker: último precio} usando yfinance."""
     prices = {}
     for ticker in tickers:
         try:
-            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range=1d"
-            r   = crequests.get(url, timeout=10, headers=HTTP_HEADERS)
-            result = r.json()["chart"]["result"][0]
-            meta   = result["meta"]
-            price  = meta.get("regularMarketPrice") or meta.get("previousClose")
+            t = yf.Ticker(ticker)
+            info = t.fast_info
+            price = info.get("last_price") or info.get("previous_close")
+            if price is None:
+                hist = t.history(period="5d")
+                if not hist.empty:
+                    price = float(hist["Close"].iloc[-1])
             if price:
                 prices[ticker] = float(price)
         except Exception:
