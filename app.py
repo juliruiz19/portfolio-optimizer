@@ -2,7 +2,7 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-from curl_cffi import requests as crequests
+import requests as crequests
 from scipy.optimize import minimize
 from scipy.stats import chi2 as chi2_dist
 import warnings
@@ -110,7 +110,7 @@ def fetch_risk_free_rate():
     """
     try:
         url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=DGS3MO"
-        r   = crequests.get(url, impersonate="chrome110", timeout=10)
+        r   = crequests.get(url, timeout=10)
         lines = [l for l in r.text.strip().split("\n") if l.strip()]
         # Iterate from the end — find the last row with a valid numeric value
         for line in reversed(lines[1:]):           # skip header
@@ -133,7 +133,7 @@ def download_prices(tickers: tuple, start: str):
         try:
             url = (f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
                    f"?interval=1d&period1={start_ts}&period2={end_ts}")
-            r    = crequests.get(url, impersonate="chrome110", timeout=15)
+            r    = crequests.get(url, timeout=15)
             data = r.json()
             result = data["chart"]["result"][0]
             ts     = result["timestamp"]
@@ -154,7 +154,7 @@ def fetch_realtime_prices(tickers: tuple) -> dict:
     for ticker in tickers:
         try:
             url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range=1d"
-            r   = crequests.get(url, impersonate="chrome110", timeout=10)
+            r   = crequests.get(url, timeout=10)
             result = r.json()["chart"]["result"][0]
             meta   = result["meta"]
             price  = meta.get("regularMarketPrice") or meta.get("previousClose")
