@@ -3,18 +3,11 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import requests as crequests
-import os
-try:
-    import yfinance as yf
-    YF_AVAILABLE = True
-except ImportError:
-    YF_AVAILABLE = False
+import yfinance as yf
 from scipy.optimize import minimize
 from scipy.stats import chi2 as chi2_dist
 import warnings
 warnings.filterwarnings("ignore")
-
-TIINGO_KEY = st.secrets.get("TIINGO_API_KEY", os.environ.get("TIINGO_API_KEY", ""))
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -120,107 +113,60 @@ HTTP_HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
-# ── Risk-free rate (FRED CSV → hardcode) ─────────────────────────────────────
+# ── Risk-free rate (^IRX via yfinance → hardcode) ────────────────────────────
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_risk_free_rate():
     """Returns (rate_annual_decimal, label_string)."""
     try:
-        url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=DGS3MO"
-        r   = crequests.get(url, timeout=10, headers=HTTP_HEADERS)
-        lines = [l for l in r.text.strip().split("\n") if l.strip()]
-        for line in reversed(lines[1:]):
-            parts = line.split(",")
-            if len(parts) == 2 and parts[1].strip() not in (".", ""):
-                rate = float(parts[1].strip()) / 100
-                date = parts[0].strip()
-                return rate, f"T-Bill 3m FRED ({date})"
+        h = yf.Ticker("^IRX").history(period="5d")
+        if not h.empty:
+            rate = float(h["Close"].iloc[-1]) / 100
+            date = str(h.index[-1].date())
+            return rate, f"T-Bill 3m ({date})"
     except Exception:
         pass
     return 0.043, "default 4.30%"
 
 # ── Data (cached) ─────────────────────────────────────────────────────────────
-def _yf_close(ticker: str, start: str) -> pd.Series | None:
-    """Fetch via yfinance (local only; not installed on cloud)."""
-    if not YF_AVAILABLE:
-        return None
-    try:
-        t = yf.Ticker(ticker)
-        df = t.history(start=start, auto_adjust=True, actions=False)
-        if df.empty:
-            return None
-        close = df["Close"]
-        if isinstance(close, pd.DataFrame):
-            close = close.iloc[:, 0]
-        close.name = ticker
-        close.index = pd.to_datetime(close.index).tz_localize(None).normalize()
-        return close[~close.index.duplicated(keep="last")]
-    except Exception:
-        return None
-
-def _tiingo_close(ticker: str, start: str) -> pd.Series | None:
-    """Fetch via Tiingo (cloud-safe)."""
-    if not TIINGO_KEY:
-        return None
-    try:
-        url = f"https://api.tiingo.com/tiingo/daily/{ticker}/prices"
-        headers = {"Authorization": f"Token {TIINGO_KEY}", "Content-Type": "application/json"}
-        params = {"startDate": start, "resampleFreq": "daily"}
-        r = crequests.get(url, params=params, headers=headers, timeout=15)
-        if r.status_code != 200:
-            st.warning(f"Tiingo {ticker}: HTTP {r.status_code} — {r.text[:120]}")
-            return None
-        data = r.json()
-        if not isinstance(data, list) or not data:
-            st.warning(f"Tiingo {ticker}: respuesta vacía — {str(data)[:120]}")
-            return None
-        df = pd.DataFrame(data)
-        dates = pd.to_datetime(df["date"])
-        if dates.dt.tz is not None:
-            dates = dates.dt.tz_convert(None)
-        df["date"] = dates.dt.normalize()
-        s = df.set_index("date")["adjClose"].rename(ticker)
-        return s[~s.index.duplicated(keep="last")]
-    except Exception as e:
-        st.warning(f"Tiingo {ticker}: excepción — {e}")
-        return None
-
-@st.cache_data(show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def download_prices(tickers: tuple, start: str):
-    """Adjusted close: Tiingo if key present (cloud), yfinance otherwise (local)."""
-    series = {}
-    for ticker in tickers:
-        # If Tiingo key is set, skip yfinance — Yahoo blocks cloud IPs and hangs
-        if TIINGO_KEY:
-            s = _tiingo_close(ticker, start)
-        else:
-            s = _yf_close(ticker, start)
-        if s is not None:
-            series[ticker] = s
-    if not series:
-        return pd.DataFrame()
-    return pd.DataFrame(series).dropna(how="all")
+    """Adjusted close via yfinance.download, with retry on rate limit."""
+    import time
+    for attempt in range(3):
+        try:
+            df = yf.download(list(tickers), start=start, auto_adjust=True, progress=False, threads=False)
+            if not df.empty:
+                close = df["Close"] if isinstance(df.columns, pd.MultiIndex) else df
+                if isinstance(close, pd.Series):
+                    close = close.to_frame(name=tickers[0])
+                close.index = pd.to_datetime(close.index).tz_localize(None).normalize()
+                return close.dropna(how="all")
+        except Exception:
+            pass
+        if attempt < 2:
+            time.sleep(5)
+    return pd.DataFrame()
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_realtime_prices(tickers: tuple) -> dict:
-    """Último precio: Tiingo si hay key, yfinance si no."""
-    from datetime import datetime, timedelta
-    start = (datetime.today() - timedelta(days=10)).strftime("%Y-%m-%d")
-    prices = {}
-    for ticker in tickers:
-        if TIINGO_KEY:
-            s = _tiingo_close(ticker, start)
-            if s is not None and not s.empty:
-                prices[ticker] = float(s.iloc[-1])
-        elif YF_AVAILABLE:
-            try:
-                t = yf.Ticker(ticker)
-                info = t.fast_info
-                price = info.get("last_price") or info.get("previous_close")
-                if price:
-                    prices[ticker] = float(price)
-            except Exception:
-                pass
-    return prices
+    """Último precio via yfinance, con retry."""
+    import time
+    for attempt in range(3):
+        try:
+            df = yf.download(list(tickers), period="5d", auto_adjust=True, progress=False, threads=False)
+            if not df.empty:
+                close = df["Close"] if isinstance(df.columns, pd.MultiIndex) else df
+                last = close.iloc[-1]
+                prices = {}
+                for ticker in tickers:
+                    if ticker in last.index and not pd.isna(last[ticker]):
+                        prices[ticker] = float(last[ticker])
+                return prices
+        except Exception:
+            pass
+        if attempt < 2:
+            time.sleep(5)
+    return {}
 
 # ── Black-Litterman (true implementation) ────────────────────────────────────
 def black_litterman_posterior(mean_returns, cov_matrix, views_annual, confidences, tau=0.025):
