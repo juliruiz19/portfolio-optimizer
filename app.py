@@ -3,8 +3,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import requests as crequests
-import yfinance as yf
-import pandas_datareader.data as web
+from yahooquery import Ticker
 from scipy.optimize import minimize
 from scipy.stats import chi2 as chi2_dist
 import warnings
@@ -133,67 +132,47 @@ def fetch_risk_free_rate():
     return 0.043, "default 4.30%"
 
 # ── Data (cached) ─────────────────────────────────────────────────────────────
-def _fetch_stooq(ticker: str, start: str) -> pd.Series | None:
-    """Fetch adjusted close from Stooq (works from cloud IPs, no auth needed)."""
-    try:
-        stooq_ticker = ticker + ".US" if not ticker.startswith("^") else ticker
-        df = web.DataReader(stooq_ticker, "stooq", start=start)
-        if df.empty:
-            return None
-        close = df["Close"].sort_index()
-        close.name = ticker
-        close.index = pd.to_datetime(close.index).normalize()
-        return close[~close.index.duplicated(keep="last")]
-    except Exception:
-        return None
-
-def _fetch_yfinance(ticker: str, start: str) -> pd.Series | None:
-    """Fallback: yfinance Ticker.history()."""
-    try:
-        t = yf.Ticker(ticker)
-        df = t.history(start=start, auto_adjust=True, actions=False)
-        if df.empty:
-            return None
-        close = df["Close"]
-        if isinstance(close, pd.DataFrame):
-            close = close.iloc[:, 0]
-        close.name = ticker
-        close.index = pd.to_datetime(close.index).tz_localize(None).normalize()
-        return close[~close.index.duplicated(keep="last")]
-    except Exception:
-        return None
-
 @st.cache_data(show_spinner=False)
 def download_prices(tickers: tuple, start: str):
-    """Adjusted close prices. Primary: Stooq (cloud-safe). Fallback: yfinance."""
-    series = {}
-    for ticker in tickers:
-        close = _fetch_stooq(ticker, start) or _fetch_yfinance(ticker, start)
-        if close is not None:
-            series[ticker] = close
-    if not series:
-        return pd.DataFrame()
-    return pd.DataFrame(series).dropna(how="all")
+    """Adjusted close prices via yahooquery (works from Streamlit Cloud)."""
+    try:
+        t = Ticker(list(tickers), asynchronous=False)
+        hist = t.history(start=start, adj_ohlc=True)
+        if isinstance(hist.index, pd.MultiIndex):
+            hist = hist.reset_index()
+            series = {}
+            for ticker in tickers:
+                sub = hist[hist["symbol"] == ticker][["date", "adjclose"]].copy()
+                if sub.empty:
+                    continue
+                sub["date"] = pd.to_datetime(sub["date"]).dt.normalize()
+                sub = sub.set_index("date")["adjclose"]
+                sub.name = ticker
+                series[ticker] = sub[~sub.index.duplicated(keep="last")]
+            if not series:
+                return pd.DataFrame()
+            return pd.DataFrame(series).dropna(how="all")
+    except Exception:
+        pass
+    return pd.DataFrame()
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_realtime_prices(tickers: tuple) -> dict:
-    """Devuelve {ticker: último precio cierre} via Stooq, fallback yfinance."""
-    from datetime import datetime, timedelta
-    prices = {}
-    start = (datetime.today() - timedelta(days=10)).strftime("%Y-%m-%d")
-    for ticker in tickers:
-        close = _fetch_stooq(ticker, start)
-        if close is not None and not close.empty:
-            prices[ticker] = float(close.iloc[-1])
-            continue
-        try:
-            t = yf.Ticker(ticker)
-            hist = t.history(period="5d")
-            if not hist.empty:
-                prices[ticker] = float(hist["Close"].iloc[-1])
-        except Exception:
-            pass
-    return prices
+    """Devuelve {ticker: último precio cierre} via yahooquery."""
+    try:
+        t = Ticker(list(tickers), asynchronous=False)
+        hist = t.history(period="5d", adj_ohlc=True)
+        if isinstance(hist.index, pd.MultiIndex):
+            hist = hist.reset_index()
+            prices = {}
+            for ticker in tickers:
+                sub = hist[hist["symbol"] == ticker]
+                if not sub.empty:
+                    prices[ticker] = float(sub["adjclose"].iloc[-1])
+            return prices
+    except Exception:
+        pass
+    return {}
 
 # ── Black-Litterman (true implementation) ────────────────────────────────────
 def black_litterman_posterior(mean_returns, cov_matrix, views_annual, confidences, tau=0.025):
