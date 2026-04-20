@@ -133,13 +133,6 @@ def fetch_risk_free_rate():
                 return rate, f"T-Bill 3m FRED ({date})"
     except Exception:
         pass
-    # Fallback: Tiingo 3-month T-Bill (ticker TBIL)
-    from datetime import datetime, timedelta
-    start = (datetime.today() - timedelta(days=10)).strftime("%Y-%m-%d")
-    s = _tiingo_close("TBIL", start)
-    if s is not None and not s.empty:
-        rate = float(s.iloc[-1]) / 100
-        return rate, f"T-Bill 3m Tiingo ({s.index[-1].date()})"
     return 0.043, "default 4.30%"
 
 # ── Data (cached) ─────────────────────────────────────────────────────────────
@@ -182,10 +175,14 @@ def _tiingo_close(ticker: str, start: str) -> pd.Series | None:
 
 @st.cache_data(show_spinner=False)
 def download_prices(tickers: tuple, start: str):
-    """Adjusted close: yfinance primary (local), Tiingo fallback (cloud)."""
+    """Adjusted close: Tiingo if key present (cloud), yfinance otherwise (local)."""
     series = {}
     for ticker in tickers:
-        s = _yf_close(ticker, start) or _tiingo_close(ticker, start)
+        # If Tiingo key is set, skip yfinance — Yahoo blocks cloud IPs and hangs
+        if TIINGO_KEY:
+            s = _tiingo_close(ticker, start)
+        else:
+            s = _yf_close(ticker, start)
         if s is not None:
             series[ticker] = s
     if not series:
@@ -194,25 +191,24 @@ def download_prices(tickers: tuple, start: str):
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_realtime_prices(tickers: tuple) -> dict:
-    """Último precio: yfinance primary, Tiingo fallback."""
+    """Último precio: Tiingo si hay key, yfinance si no."""
     from datetime import datetime, timedelta
-    prices = {}
     start = (datetime.today() - timedelta(days=10)).strftime("%Y-%m-%d")
+    prices = {}
     for ticker in tickers:
-        # yfinance fast_info
-        try:
-            t = yf.Ticker(ticker)
-            info = t.fast_info
-            price = info.get("last_price") or info.get("previous_close")
-            if price:
-                prices[ticker] = float(price)
-                continue
-        except Exception:
-            pass
-        # Tiingo fallback
-        s = _tiingo_close(ticker, start)
-        if s is not None and not s.empty:
-            prices[ticker] = float(s.iloc[-1])
+        if TIINGO_KEY:
+            s = _tiingo_close(ticker, start)
+            if s is not None and not s.empty:
+                prices[ticker] = float(s.iloc[-1])
+        else:
+            try:
+                t = yf.Ticker(ticker)
+                info = t.fast_info
+                price = info.get("last_price") or info.get("previous_close")
+                if price:
+                    prices[ticker] = float(price)
+            except Exception:
+                pass
     return prices
 
 # ── Black-Litterman (true implementation) ────────────────────────────────────
