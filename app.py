@@ -4,6 +4,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import requests as crequests
 import os
+import yfinance as yf
 from scipy.optimize import minimize
 from scipy.stats import chi2 as chi2_dist
 import warnings
@@ -115,10 +116,11 @@ HTTP_HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
-# ── Risk-free rate (FRED CSV → fallback hardcode) ─────────────────────────────
+# ── Risk-free rate (FRED CSV → Tiingo ^TNX → hardcode) ───────────────────────
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_risk_free_rate():
     """Returns (rate_annual_decimal, label_string)."""
+    # Primary: FRED CSV (works from most IPs)
     try:
         url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=DGS3MO"
         r   = crequests.get(url, timeout=10, headers=HTTP_HEADERS)
@@ -131,11 +133,34 @@ def fetch_risk_free_rate():
                 return rate, f"T-Bill 3m FRED ({date})"
     except Exception:
         pass
+    # Fallback: Tiingo 3-month T-Bill (ticker TBIL)
+    from datetime import datetime, timedelta
+    start = (datetime.today() - timedelta(days=10)).strftime("%Y-%m-%d")
+    s = _tiingo_close("TBIL", start)
+    if s is not None and not s.empty:
+        rate = float(s.iloc[-1]) / 100
+        return rate, f"T-Bill 3m Tiingo ({s.index[-1].date()})"
     return 0.043, "default 4.30%"
 
 # ── Data (cached) ─────────────────────────────────────────────────────────────
+def _yf_close(ticker: str, start: str) -> pd.Series | None:
+    """Fetch via yfinance (works locally; Yahoo may block cloud IPs)."""
+    try:
+        t = yf.Ticker(ticker)
+        df = t.history(start=start, auto_adjust=True, actions=False)
+        if df.empty:
+            return None
+        close = df["Close"]
+        if isinstance(close, pd.DataFrame):
+            close = close.iloc[:, 0]
+        close.name = ticker
+        close.index = pd.to_datetime(close.index).tz_localize(None).normalize()
+        return close[~close.index.duplicated(keep="last")]
+    except Exception:
+        return None
+
 def _tiingo_close(ticker: str, start: str) -> pd.Series | None:
-    """Fetch adjusted close from Tiingo (works from any IP, free API key required)."""
+    """Fallback via Tiingo when Yahoo is blocked (Streamlit Cloud)."""
     if not TIINGO_KEY:
         return None
     try:
@@ -146,21 +171,21 @@ def _tiingo_close(ticker: str, start: str) -> pd.Series | None:
         if not isinstance(data, list) or not data:
             return None
         df = pd.DataFrame(data)
-        df["date"] = pd.to_datetime(df["date"]).dt.tz_localize(None).dt.normalize()
-        df = df.set_index("date")["adjClose"].rename(ticker)
-        return df[~df.index.duplicated(keep="last")]
+        dates = pd.to_datetime(df["date"])
+        if dates.dt.tz is not None:
+            dates = dates.dt.tz_convert(None)
+        df["date"] = dates.dt.normalize()
+        s = df.set_index("date")["adjClose"].rename(ticker)
+        return s[~s.index.duplicated(keep="last")]
     except Exception:
         return None
 
 @st.cache_data(show_spinner=False)
 def download_prices(tickers: tuple, start: str):
-    """Adjusted close prices via Tiingo (cloud-safe, free API key)."""
-    if not TIINGO_KEY:
-        st.error("Falta la API key de Tiingo. Agregá TIINGO_API_KEY en los Secrets de Streamlit Cloud.")
-        return pd.DataFrame()
+    """Adjusted close: yfinance primary (local), Tiingo fallback (cloud)."""
     series = {}
     for ticker in tickers:
-        s = _tiingo_close(ticker, start)
+        s = _yf_close(ticker, start) or _tiingo_close(ticker, start)
         if s is not None:
             series[ticker] = s
     if not series:
@@ -169,11 +194,22 @@ def download_prices(tickers: tuple, start: str):
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_realtime_prices(tickers: tuple) -> dict:
-    """Último precio ajustado via Tiingo."""
+    """Último precio: yfinance primary, Tiingo fallback."""
     from datetime import datetime, timedelta
-    start = (datetime.today() - timedelta(days=10)).strftime("%Y-%m-%d")
     prices = {}
+    start = (datetime.today() - timedelta(days=10)).strftime("%Y-%m-%d")
     for ticker in tickers:
+        # yfinance fast_info
+        try:
+            t = yf.Ticker(ticker)
+            info = t.fast_info
+            price = info.get("last_price") or info.get("previous_close")
+            if price:
+                prices[ticker] = float(price)
+                continue
+        except Exception:
+            pass
+        # Tiingo fallback
         s = _tiingo_close(ticker, start)
         if s is not None and not s.empty:
             prices[ticker] = float(s.iloc[-1])
