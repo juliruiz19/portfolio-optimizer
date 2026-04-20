@@ -3,11 +3,13 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import requests as crequests
-from yahooquery import Ticker
+import os
 from scipy.optimize import minimize
 from scipy.stats import chi2 as chi2_dist
 import warnings
 warnings.filterwarnings("ignore")
+
+TIINGO_KEY = st.secrets.get("TIINGO_API_KEY", os.environ.get("TIINGO_API_KEY", ""))
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -132,47 +134,50 @@ def fetch_risk_free_rate():
     return 0.043, "default 4.30%"
 
 # ── Data (cached) ─────────────────────────────────────────────────────────────
+def _tiingo_close(ticker: str, start: str) -> pd.Series | None:
+    """Fetch adjusted close from Tiingo (works from any IP, free API key required)."""
+    if not TIINGO_KEY:
+        return None
+    try:
+        url = f"https://api.tiingo.com/tiingo/daily/{ticker}/prices"
+        params = {"startDate": start, "resampleFreq": "daily", "token": TIINGO_KEY}
+        r = crequests.get(url, params=params, timeout=15)
+        data = r.json()
+        if not isinstance(data, list) or not data:
+            return None
+        df = pd.DataFrame(data)
+        df["date"] = pd.to_datetime(df["date"]).dt.tz_localize(None).dt.normalize()
+        df = df.set_index("date")["adjClose"].rename(ticker)
+        return df[~df.index.duplicated(keep="last")]
+    except Exception:
+        return None
+
 @st.cache_data(show_spinner=False)
 def download_prices(tickers: tuple, start: str):
-    """Adjusted close prices via yahooquery (works from Streamlit Cloud)."""
-    try:
-        t = Ticker(list(tickers), asynchronous=False)
-        hist = t.history(start=start, adj_ohlc=True)
-        if isinstance(hist.index, pd.MultiIndex):
-            hist = hist.reset_index()
-            series = {}
-            for ticker in tickers:
-                sub = hist[hist["symbol"] == ticker][["date", "adjclose"]].copy()
-                if sub.empty:
-                    continue
-                sub["date"] = pd.to_datetime(sub["date"]).dt.normalize()
-                sub = sub.set_index("date")["adjclose"]
-                sub.name = ticker
-                series[ticker] = sub[~sub.index.duplicated(keep="last")]
-            if not series:
-                return pd.DataFrame()
-            return pd.DataFrame(series).dropna(how="all")
-    except Exception:
-        pass
-    return pd.DataFrame()
+    """Adjusted close prices via Tiingo (cloud-safe, free API key)."""
+    if not TIINGO_KEY:
+        st.error("Falta la API key de Tiingo. Agregá TIINGO_API_KEY en los Secrets de Streamlit Cloud.")
+        return pd.DataFrame()
+    series = {}
+    for ticker in tickers:
+        s = _tiingo_close(ticker, start)
+        if s is not None:
+            series[ticker] = s
+    if not series:
+        return pd.DataFrame()
+    return pd.DataFrame(series).dropna(how="all")
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_realtime_prices(tickers: tuple) -> dict:
-    """Devuelve {ticker: último precio cierre} via yahooquery."""
-    try:
-        t = Ticker(list(tickers), asynchronous=False)
-        hist = t.history(period="5d", adj_ohlc=True)
-        if isinstance(hist.index, pd.MultiIndex):
-            hist = hist.reset_index()
-            prices = {}
-            for ticker in tickers:
-                sub = hist[hist["symbol"] == ticker]
-                if not sub.empty:
-                    prices[ticker] = float(sub["adjclose"].iloc[-1])
-            return prices
-    except Exception:
-        pass
-    return {}
+    """Último precio ajustado via Tiingo."""
+    from datetime import datetime, timedelta
+    start = (datetime.today() - timedelta(days=10)).strftime("%Y-%m-%d")
+    prices = {}
+    for ticker in tickers:
+        s = _tiingo_close(ticker, start)
+        if s is not None and not s.empty:
+            prices[ticker] = float(s.iloc[-1])
+    return prices
 
 # ── Black-Litterman (true implementation) ────────────────────────────────────
 def black_litterman_posterior(mean_returns, cov_matrix, views_annual, confidences, tau=0.025):
