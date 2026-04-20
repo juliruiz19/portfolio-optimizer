@@ -158,15 +158,20 @@ def _yf_close(ticker: str, start: str) -> pd.Series | None:
         return None
 
 def _tiingo_close(ticker: str, start: str) -> pd.Series | None:
-    """Fallback via Tiingo when Yahoo is blocked (Streamlit Cloud)."""
+    """Fetch via Tiingo (cloud-safe)."""
     if not TIINGO_KEY:
         return None
     try:
         url = f"https://api.tiingo.com/tiingo/daily/{ticker}/prices"
-        params = {"startDate": start, "resampleFreq": "daily", "token": TIINGO_KEY}
-        r = crequests.get(url, params=params, timeout=15)
+        headers = {"Authorization": f"Token {TIINGO_KEY}", "Content-Type": "application/json"}
+        params = {"startDate": start, "resampleFreq": "daily"}
+        r = crequests.get(url, params=params, headers=headers, timeout=15)
+        if r.status_code != 200:
+            st.warning(f"Tiingo {ticker}: HTTP {r.status_code} — {r.text[:120]}")
+            return None
         data = r.json()
         if not isinstance(data, list) or not data:
+            st.warning(f"Tiingo {ticker}: respuesta vacía — {str(data)[:120]}")
             return None
         df = pd.DataFrame(data)
         dates = pd.to_datetime(df["date"])
@@ -175,7 +180,8 @@ def _tiingo_close(ticker: str, start: str) -> pd.Series | None:
         df["date"] = dates.dt.normalize()
         s = df.set_index("date")["adjClose"].rename(ticker)
         return s[~s.index.duplicated(keep="last")]
-    except Exception:
+    except Exception as e:
+        st.warning(f"Tiingo {ticker}: excepción — {e}")
         return None
 
 @st.cache_data(show_spinner=False)
