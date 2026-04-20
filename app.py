@@ -145,24 +145,19 @@ def fetch_risk_free_rate():
 # ── Data (cached) ─────────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def download_prices(tickers: tuple, start: str):
-    """Adjusted close prices via yfinance (handles Yahoo's auth dance)."""
+    """Adjusted close prices via yfinance Ticker.history() (more reliable on cloud)."""
     series = {}
     for ticker in tickers:
         try:
-            df = yf.download(
-                ticker,
-                start=start,
-                progress=False,
-                auto_adjust=True,
-                threads=False,
-            )
+            t = yf.Ticker(ticker)
+            df = t.history(start=start, auto_adjust=True, actions=False)
             if df.empty:
                 continue
             close = df["Close"]
             if isinstance(close, pd.DataFrame):
                 close = close.iloc[:, 0]
             close.name = ticker
-            close.index = pd.to_datetime(close.index).normalize()
+            close.index = pd.to_datetime(close.index).tz_localize(None).normalize()
             series[ticker] = close[~close.index.duplicated(keep="last")]
         except Exception:
             pass
