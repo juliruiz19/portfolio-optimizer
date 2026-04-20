@@ -4,7 +4,11 @@ import pandas as pd
 import plotly.graph_objects as go
 import requests as crequests
 import os
-import yfinance as yf
+try:
+    import yfinance as yf
+    YF_AVAILABLE = True
+except ImportError:
+    YF_AVAILABLE = False
 from scipy.optimize import minimize
 from scipy.stats import chi2 as chi2_dist
 import warnings
@@ -136,7 +140,9 @@ def fetch_risk_free_rate():
 
 # ── Data (cached) ─────────────────────────────────────────────────────────────
 def _yf_close(ticker: str, start: str) -> pd.Series | None:
-    """Fetch via yfinance (works locally; Yahoo may block cloud IPs)."""
+    """Fetch via yfinance (local only; not installed on cloud)."""
+    if not YF_AVAILABLE:
+        return None
     try:
         t = yf.Ticker(ticker)
         df = t.history(start=start, auto_adjust=True, actions=False)
@@ -199,7 +205,7 @@ def fetch_realtime_prices(tickers: tuple) -> dict:
             s = _tiingo_close(ticker, start)
             if s is not None and not s.empty:
                 prices[ticker] = float(s.iloc[-1])
-        else:
+        elif YF_AVAILABLE:
             try:
                 t = yf.Ticker(ticker)
                 info = t.fast_info
