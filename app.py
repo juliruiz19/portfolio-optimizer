@@ -113,19 +113,26 @@ HTTP_HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
-# ── Risk-free rate (live from FRED) ───────────────────────────────────────────
-@st.cache_data(ttl=3600, show_spinner=False)   # refresh every hour
+# ── Risk-free rate (via yfinance ^IRX, fallback FRED) ─────────────────────────
+@st.cache_data(ttl=3600, show_spinner=False)
 def fetch_risk_free_rate():
-    """
-    Fetches the 3-month US Treasury bill rate (DGS3MO) from FRED.
-    Returns (rate_annual_decimal, label_string) or fallback if fetch fails.
-    """
+    """Returns (rate_annual_decimal, label_string). Uses ^IRX (13-week T-Bill) via yfinance."""
+    # Primary: ^IRX via yfinance (works from cloud IPs, no auth needed)
+    try:
+        t = yf.Ticker("^IRX")
+        hist = t.history(period="5d")
+        if not hist.empty:
+            rate = float(hist["Close"].iloc[-1]) / 100
+            date = str(hist.index[-1].date())
+            return rate, f"T-Bill 13w Yahoo ({date})"
+    except Exception:
+        pass
+    # Fallback: FRED CSV
     try:
         url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=DGS3MO"
         r   = crequests.get(url, timeout=10, headers=HTTP_HEADERS)
         lines = [l for l in r.text.strip().split("\n") if l.strip()]
-        # Iterate from the end — find the last row with a valid numeric value
-        for line in reversed(lines[1:]):           # skip header
+        for line in reversed(lines[1:]):
             parts = line.split(",")
             if len(parts) == 2 and parts[1].strip() not in (".", ""):
                 rate  = float(parts[1].strip()) / 100
