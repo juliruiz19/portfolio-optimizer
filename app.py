@@ -4,6 +4,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import requests as crequests
 import yfinance as yf
+import pandas_datareader.data as web
 from scipy.optimize import minimize
 from scipy.stats import chi2 as chi2_dist
 import warnings
@@ -113,21 +114,10 @@ HTTP_HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
-# ── Risk-free rate (via yfinance ^IRX, fallback FRED) ─────────────────────────
+# ── Risk-free rate (FRED CSV → fallback hardcode) ─────────────────────────────
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_risk_free_rate():
-    """Returns (rate_annual_decimal, label_string). Uses ^IRX (13-week T-Bill) via yfinance."""
-    # Primary: ^IRX via yfinance (works from cloud IPs, no auth needed)
-    try:
-        t = yf.Ticker("^IRX")
-        hist = t.history(period="5d")
-        if not hist.empty:
-            rate = float(hist["Close"].iloc[-1]) / 100
-            date = str(hist.index[-1].date())
-            return rate, f"T-Bill 13w Yahoo ({date})"
-    except Exception:
-        pass
-    # Fallback: FRED CSV
+    """Returns (rate_annual_decimal, label_string)."""
     try:
         url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=DGS3MO"
         r   = crequests.get(url, timeout=10, headers=HTTP_HEADERS)
@@ -140,46 +130,67 @@ def fetch_risk_free_rate():
                 return rate, f"T-Bill 3m FRED ({date})"
     except Exception:
         pass
-    return 0.045, "default 4.50%"
+    return 0.043, "default 4.30%"
 
 # ── Data (cached) ─────────────────────────────────────────────────────────────
+def _fetch_stooq(ticker: str, start: str) -> pd.Series | None:
+    """Fetch adjusted close from Stooq (works from cloud IPs, no auth needed)."""
+    try:
+        stooq_ticker = ticker + ".US" if not ticker.startswith("^") else ticker
+        df = web.DataReader(stooq_ticker, "stooq", start=start)
+        if df.empty:
+            return None
+        close = df["Close"].sort_index()
+        close.name = ticker
+        close.index = pd.to_datetime(close.index).normalize()
+        return close[~close.index.duplicated(keep="last")]
+    except Exception:
+        return None
+
+def _fetch_yfinance(ticker: str, start: str) -> pd.Series | None:
+    """Fallback: yfinance Ticker.history()."""
+    try:
+        t = yf.Ticker(ticker)
+        df = t.history(start=start, auto_adjust=True, actions=False)
+        if df.empty:
+            return None
+        close = df["Close"]
+        if isinstance(close, pd.DataFrame):
+            close = close.iloc[:, 0]
+        close.name = ticker
+        close.index = pd.to_datetime(close.index).tz_localize(None).normalize()
+        return close[~close.index.duplicated(keep="last")]
+    except Exception:
+        return None
+
 @st.cache_data(show_spinner=False)
 def download_prices(tickers: tuple, start: str):
-    """Adjusted close prices via yfinance Ticker.history() (more reliable on cloud)."""
+    """Adjusted close prices. Primary: Stooq (cloud-safe). Fallback: yfinance."""
     series = {}
     for ticker in tickers:
-        try:
-            t = yf.Ticker(ticker)
-            df = t.history(start=start, auto_adjust=True, actions=False)
-            if df.empty:
-                continue
-            close = df["Close"]
-            if isinstance(close, pd.DataFrame):
-                close = close.iloc[:, 0]
-            close.name = ticker
-            close.index = pd.to_datetime(close.index).tz_localize(None).normalize()
-            series[ticker] = close[~close.index.duplicated(keep="last")]
-        except Exception:
-            pass
+        close = _fetch_stooq(ticker, start) or _fetch_yfinance(ticker, start)
+        if close is not None:
+            series[ticker] = close
     if not series:
         return pd.DataFrame()
     return pd.DataFrame(series).dropna(how="all")
 
-@st.cache_data(ttl=60, show_spinner=False)   # precio real, cache 1 minuto
+@st.cache_data(ttl=300, show_spinner=False)
 def fetch_realtime_prices(tickers: tuple) -> dict:
-    """Devuelve {ticker: último precio} usando yfinance."""
+    """Devuelve {ticker: último precio cierre} via Stooq, fallback yfinance."""
+    from datetime import datetime, timedelta
     prices = {}
+    start = (datetime.today() - timedelta(days=10)).strftime("%Y-%m-%d")
     for ticker in tickers:
+        close = _fetch_stooq(ticker, start)
+        if close is not None and not close.empty:
+            prices[ticker] = float(close.iloc[-1])
+            continue
         try:
             t = yf.Ticker(ticker)
-            info = t.fast_info
-            price = info.get("last_price") or info.get("previous_close")
-            if price is None:
-                hist = t.history(period="5d")
-                if not hist.empty:
-                    price = float(hist["Close"].iloc[-1])
-            if price:
-                prices[ticker] = float(price)
+            hist = t.history(period="5d")
+            if not hist.empty:
+                prices[ticker] = float(hist["Close"].iloc[-1])
         except Exception:
             pass
     return prices
