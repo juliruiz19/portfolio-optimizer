@@ -1155,7 +1155,7 @@ with tab1:
                 "Peso total":         f"{peso_total*100:.1f}%",
                 "Monto asignado":     f"${monto:,.0f}",
                 "Precio":             f"${precio:,.2f}",
-                "Cantidad":           cantidad,
+                "Cantidad":           str(cantidad),
                 "Total compra":       f"${total_compra:,.0f}",
             })
         else:
