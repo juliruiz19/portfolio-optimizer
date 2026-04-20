@@ -116,11 +116,10 @@ HTTP_HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
-# ── Risk-free rate (FRED CSV → Tiingo ^TNX → hardcode) ───────────────────────
+# ── Risk-free rate (FRED CSV → hardcode) ─────────────────────────────────────
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_risk_free_rate():
     """Returns (rate_annual_decimal, label_string)."""
-    # Primary: FRED CSV (works from most IPs)
     try:
         url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=DGS3MO"
         r   = crequests.get(url, timeout=10, headers=HTTP_HEADERS)
@@ -128,8 +127,8 @@ def fetch_risk_free_rate():
         for line in reversed(lines[1:]):
             parts = line.split(",")
             if len(parts) == 2 and parts[1].strip() not in (".", ""):
-                rate  = float(parts[1].strip()) / 100
-                date  = parts[0].strip()
+                rate = float(parts[1].strip()) / 100
+                date = parts[0].strip()
                 return rate, f"T-Bill 3m FRED ({date})"
     except Exception:
         pass
